@@ -149,7 +149,11 @@ def run_tracker(shared_state):
         
     with vision.FaceLandmarker.create_from_options(options) as detector:
         while shared_state['running']:
-            img_surf = cam.get_image()
+            try:
+                img_surf = cam.get_image()
+            except Exception:
+                time.sleep(0.02)
+                continue
             if img_surf is None:
                 time.sleep(0.01)
                 continue
@@ -256,7 +260,7 @@ class GazeCalibrator:
     REFIT_INTERVAL = 5           # refit mapping every N new implicit samples
     EXPLICIT_WEIGHT = 3.0        # trust deliberate calibration-point fixations more...
     IMPLICIT_WEIGHT = 1.0        # ...than inferred "they were probably looking at the key" data
-    OUTLIER_REJECT_PX = 220      # skip an implicit sample if current model already misses by more than this
+    OUTLIER_REJECT_PX = 340      # skip an implicit sample if current model already misses by more than this
     CALIB_FILE = "gaze_calibration.json"
     N_FEATURES = 8                # [1, h, v, h^2, v^2, h*v, yaw, pitch]
     RIDGE_LAMBDA = 0.6              # L2 penalty in standardized feature space; tuned via
@@ -271,23 +275,24 @@ class GazeCalibrator:
     def __init__(self, w, h):
         from collections import deque
         self.w, self.h_screen = w, h
-        # 13-point layout: 3x3 core grid + 4 true edge/corner-adjacent points, so the
-        # fit has real support near the screen boundaries instead of only extrapolating
-        # a quadratic curve fit from points that stop at 15%/85% of the screen.
+        # Dense 37-point calibration dataset:
+        # 5x5 core grid (25 points) + 8 boundary edge/corner points (33 spatial points total)
+        # plus 4 head-tilt variation points to train gaze + head-pose regression terms.
         self.points = []
-        for vy in [0.15, 0.5, 0.85]:
-            for vx in [0.15, 0.5, 0.85]:
+        # 5x5 core spatial grid
+        for vy in [0.08, 0.29, 0.50, 0.71, 0.92]:
+            for vx in [0.08, 0.29, 0.50, 0.71, 0.92]:
                 self.points.append((int(w * vx), int(h * vy)))
-        for (vx, vy) in [(0.5, 0.04), (0.5, 0.96), (0.04, 0.5), (0.96, 0.5)]:
+        # 8 boundary edge and corner points
+        for (vx, vy) in [
+            (0.50, 0.03), (0.50, 0.97), (0.03, 0.50), (0.97, 0.50),
+            (0.03, 0.03), (0.97, 0.03), (0.03, 0.97), (0.97, 0.97)
+        ]:
             self.points.append((int(w * vx), int(h * vy)))
-        self.n_spatial_points = len(self.points)  # 13
+        self.n_spatial_points = len(self.points)  # 33
 
         # Head-pose calibration sweep: same on-screen target (center), but the user is
-        # asked to keep their eyes fixed on it while gently turning their head. This is
-        # the only way to give the yaw/pitch regression terms real, decoupled variance to
-        # learn from -- during the spatial grid above the head is essentially stationary,
-        # so ridge regression correctly (but unhelpfully) shrinks those coefficients to
-        # ~0, meaning head-pose compensation does nothing without this extra step.
+        # asked to keep their eyes fixed on it while gently turning their head.
         self.tilt_prompts = [
             "Turn your head slightly LEFT",
             "Turn your head slightly RIGHT",
@@ -697,9 +702,9 @@ class VirtualKeyboard:
             ['SPACE', 'BACKSPACE', 'CLEAR', 'CALIBRATE', 'LAYOUT']
         ]
         
-        # Use more of the vertical space for the keyboard (was exactly half the
-        # screen) so each key is physically bigger relative to typical gaze error.
-        keyboard_y_start = int(screen_h * 0.42)
+        # Use more of the vertical space for the keyboard so each key is
+        # physically bigger relative to typical gaze error.
+        keyboard_y_start = int(screen_h * 0.32)
         keyboard_h = screen_h - keyboard_y_start
         row_h = keyboard_h // len(rows)
         
@@ -710,7 +715,7 @@ class VirtualKeyboard:
                 x = 20 + c_idx * key_w
                 y = keyboard_y_start + r_idx * row_h
                 # Visual rect: small padding so keys look distinct.
-                visual = (x + 5, y + 10, key_w - 10, row_h - 20)
+                visual = (x + 5, y + 8, key_w - 10, row_h - 16)
                 # Hit rect: the FULL cell, edge-to-edge with neighbors -- no dead zone.
                 hit = (x, y, key_w, row_h)
                 k = VirtualKey(char, visual, hit_rect=hit)
@@ -720,11 +725,7 @@ class VirtualKeyboard:
 class ZoomKeyboard:
     """Two-tier ('zoom') keyboard: first dwell picks a zone of ~5 letters shown as a
     few large tiles; that dwell then swaps to a second screen showing just those
-    letters blown up to fill most of the keyboard area, plus a BACK tile. This trades
-    one extra dwell per character for roughly 3x the target area of the single-tier
-    layout -- worthwhile once single-tier selection is still unreliable even after
-    calibration and dead-zone fixes, since target size is now the dominant error
-    source rather than gaze-mapping accuracy.
+    letters blown up to fill most of the keyboard area, plus a BACK tile.
     """
     ZONES = [
         ['Q', 'W', 'E', 'R', 'T'],
@@ -744,7 +745,7 @@ class ZoomKeyboard:
         self._build_zone_view()
 
     def _action_row_top(self):
-        return self.h - 90
+        return self.h - 95
 
     def _add_action_row(self):
         n = len(self.ACTIONS)
@@ -752,8 +753,8 @@ class ZoomKeyboard:
         cell_w = (self.w - 40) // n
         for i, label in enumerate(self.ACTIONS):
             x = 20 + i * cell_w
-            visual = (x + 5, y + 10, cell_w - 10, 55)
-            hit = (x, y, cell_w, 80)
+            visual = (x + 5, y + 8, cell_w - 10, 75)
+            hit = (x, y, cell_w, 95)
             k = VirtualKey(label, visual, hit_rect=hit)
             k.key_type = 'action'
             self.keys.append(k)
@@ -763,7 +764,7 @@ class ZoomKeyboard:
         self.current_zone = None
         self.keys = []
 
-        area_top = int(self.h * 0.42)
+        area_top = int(self.h * 0.32)
         area_bottom = self._action_row_top()
         area_h = area_bottom - area_top
         cols, rows = 3, 2
@@ -774,7 +775,7 @@ class ZoomKeyboard:
             r, c = divmod(i, cols)
             x = 20 + c * cell_w
             y = area_top + r * cell_h
-            visual = (x + 6, y + 8, cell_w - 12, cell_h - 16)
+            visual = (x + 8, y + 8, cell_w - 16, cell_h - 16)
             hit = (x, y, cell_w, cell_h)
             label = " ".join(zone)  # e.g. "Q W E R T" -- readable at a glance
             k = VirtualKey(label, visual, hit_rect=hit)
@@ -790,7 +791,7 @@ class ZoomKeyboard:
         self.keys = []
 
         letters = self.ZONES[zone_idx]
-        area_top = int(self.h * 0.42)
+        area_top = int(self.h * 0.32)
         area_bottom = self._action_row_top()
         area_h = area_bottom - area_top
 
@@ -799,7 +800,7 @@ class ZoomKeyboard:
 
         for i, ch in enumerate(letters):
             x = 20 + i * cell_w
-            visual = (x + 6, area_top + 8, cell_w - 12, area_h - 16)
+            visual = (x + 8, area_top + 8, cell_w - 16, area_h - 16)
             hit = (x, area_top, cell_w, area_h)
             k = VirtualKey(ch, visual, hit_rect=hit)
             k.key_type = 'letter'
@@ -807,7 +808,7 @@ class ZoomKeyboard:
 
         # BACK tile, same size as the letters so it's just as easy/hard to hit
         x = 20 + len(letters) * cell_w
-        visual = (x + 6, area_top + 8, cell_w - 12, area_h - 16)
+        visual = (x + 8, area_top + 8, cell_w - 16, area_h - 16)
         hit = (x, area_top, cell_w, area_h)
         back_k = VirtualKey("BACK", visual, hit_rect=hit)
         back_k.key_type = 'back'
@@ -826,13 +827,22 @@ class ZoomKeyboard:
 # ------------------------------------------------------------------
 def main():
     pygame.init()
-    W, H = 1024, 768
-    screen = pygame.display.set_mode((W, H))
-    pygame.display.set_caption("Eye-Gaze Virtual Keyboard")
+    info = pygame.display.Info()
+    if info.current_w > 0 and info.current_h > 0:
+        W = info.current_w
+        H = int(W * 9 / 16)
+        if H > info.current_h:
+            H = info.current_h
+            W = int(H * 16 / 9)
+    else:
+        W, H = 1600, 900
+
+    screen = pygame.display.set_mode((W, H), pygame.RESIZABLE)
+    pygame.display.set_caption("Eye-Gaze Virtual Keyboard (16:9 Fullscreen UI)")
     
-    font_large = pygame.font.SysFont("segoeui", 48)
-    font_keys = pygame.font.SysFont("segoeui", 32, bold=True)
-    font_ui = pygame.font.SysFont("segoeui", 24)
+    font_large = pygame.font.SysFont("segoeui", int(H * 0.055))
+    font_keys = pygame.font.SysFont("segoeui", int(H * 0.040), bold=True)
+    font_ui = pygame.font.SysFont("segoeui", int(H * 0.028))
     
     # State
     shared_state = {
@@ -867,12 +877,14 @@ def main():
     
     ui_anim_timers = {'MODE': 0.0, 'DM': 0.0, 'DP': 0.0, 'SM': 0.0, 'SP': 0.0}
     
-    # UI Rects
-    btn_mode = pygame.Rect(20, 220, 160, 40)
-    btn_dwell_minus = pygame.Rect(200, 220, 40, 40)
-    btn_dwell_plus = pygame.Rect(400, 220, 40, 40)
-    btn_smooth_minus = pygame.Rect(460, 220, 40, 40)
-    btn_smooth_plus = pygame.Rect(660, 220, 40, 40)
+    # UI Rects (Reinforced for 16:9)
+    btn_y = int(H * 0.235)
+    btn_h = int(H * 0.050)
+    btn_mode = pygame.Rect(int(W * 0.0125), btn_y, int(W * 0.125), btn_h)
+    btn_dwell_minus = pygame.Rect(int(W * 0.150), btn_y, int(W * 0.032), btn_h)
+    btn_dwell_plus = pygame.Rect(int(W * 0.325), btn_y, int(W * 0.032), btn_h)
+    btn_smooth_minus = pygame.Rect(int(W * 0.375), btn_y, int(W * 0.032), btn_h)
+    btn_smooth_plus = pygame.Rect(int(W * 0.550), btn_y, int(W * 0.032), btn_h)
     
     while shared_state['running']:
         dt = clock.tick(60) / 1000.0
@@ -892,6 +904,8 @@ def main():
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     shared_state['running'] = False
+                elif event.key == pygame.K_F11:
+                    pygame.display.toggle_fullscreen()
                 elif event.key == pygame.K_SPACE and calibrator.calibrating:
                     # Spacebar to record calibration point
                     with shared_state['lock']:
@@ -1079,7 +1093,7 @@ def main():
         screen.fill((15, 15, 18))
         
         # Draw Text Area
-        text_rect = pygame.Rect(20, 20, W - 220, 180)
+        text_rect = pygame.Rect(20, 20, W - 280, 180)
         pygame.draw.rect(screen, (30, 30, 35), text_rect, border_radius=15)
         # Render text with word wrap (simple)
         words = typed_text.split(" ")
@@ -1087,7 +1101,7 @@ def main():
         current_line = ""
         for word in words:
             test_line = current_line + word + " "
-            if font_large.size(test_line)[0] > text_rect.width - 20:
+            if font_large.size(test_line)[0] > text_rect.width - 30:
                 lines.append(current_line)
                 current_line = word + " "
             else:
@@ -1096,7 +1110,7 @@ def main():
         
         for i, line in enumerate(lines[-3:]): # show last 3 lines
             surf = font_large.render(line, True, (240, 240, 240))
-            screen.blit(surf, (text_rect.x + 15, text_rect.y + 15 + i * 50))
+            screen.blit(surf, (text_rect.x + 20, text_rect.y + 15 + i * 52))
             
         # Draw UI Buttons
         def draw_btn(r, label, tag):
@@ -1124,16 +1138,19 @@ def main():
         h_dm = draw_btn(btn_dwell_minus, "-", 'DM')
         h_dp = draw_btn(btn_dwell_plus, "+", 'DP')
         # Dwell Label
-        screen.blit(font_ui.render(f"Dwell: {dwell_limit:.1f}s", True, (200, 200, 200)), (250, 225))
+        dwell_lbl = font_ui.render(f"Dwell: {dwell_limit:.1f}s", True, (200, 200, 200))
+        screen.blit(dwell_lbl, dwell_lbl.get_rect(center=((btn_dwell_minus.right + btn_dwell_plus.left) // 2, btn_dwell_minus.centery)))
         
         h_sm = draw_btn(btn_smooth_minus, "-", 'SM')
         h_sp = draw_btn(btn_smooth_plus, "+", 'SP')
-        screen.blit(font_ui.render(f"Smooth: {smoothing_alpha:.2f}", True, (200, 200, 200)), (510, 225))
+        smooth_lbl = font_ui.render(f"Smooth: {smoothing_alpha:.2f}", True, (200, 200, 200))
+        screen.blit(smooth_lbl, smooth_lbl.get_rect(center=((btn_smooth_minus.right + btn_smooth_plus.left) // 2, btn_smooth_minus.centery)))
         
         # Draw Webcam PiP
         if pip_surf:
-            pip_rect = pip_surf.get_rect(topright=(W - 20, 20))
-            screen.blit(pip_surf, pip_rect)
+            pip_scaled = pygame.transform.scale(pip_surf, (240, 180))
+            pip_rect = pip_scaled.get_rect(topright=(W - 20, 20))
+            screen.blit(pip_scaled, pip_rect)
             pygame.draw.rect(screen, (100, 100, 100), pip_rect, 2)
             if not calibrator.is_calibrated and not mouse_mode:
                 warn = font_ui.render("NOT CALIBRATED", True, (255, 50, 50))
@@ -1205,9 +1222,9 @@ def main():
             # Briefly show the estimated calibration accuracy right after finishing,
             # so a bad calibration is visible instead of silently trusted.
             rms = calibrator.calib_rms_px
-            if rms < 40:
+            if rms < 60:
                 quality, color = "Good", (0, 230, 118)
-            elif rms < 80:
+            elif rms < 120:
                 quality, color = "Fair — consider recalibrating in better lighting", (255, 200, 0)
             else:
                 quality, color = "Poor — please recalibrate (look steadily at each dot)", (255, 80, 80)
